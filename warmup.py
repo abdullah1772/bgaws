@@ -1,5 +1,6 @@
 import sys
 import traceback
+
 from rembg import new_session
 
 MODELS = [
@@ -21,15 +22,20 @@ MODELS = [
     "bria-rmbg",
 ]
 
+
 if __name__ == "__main__":
     ok = []
     fail = []
 
     print("Starting rembg model warmup/download...\n")
     for m in MODELS:
-        print(f"Downloading model: {m}")
+        print(f"Downloading / initializing model: {m}")
         try:
-            _ = new_session(m)  # triggers model download/cache
+            # Prefer CUDA, fall back to CPU inside rembg if needed
+            _ = new_session(
+                model_name=m,
+                providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+            )
             ok.append(m)
             print(f"OK: {m}\n")
         except Exception as e:
@@ -46,4 +52,5 @@ if __name__ == "__main__":
         for m, err in fail:
             print(f"- {m}: {err}")
 
+    # Exit with non-zero if any model failed
     sys.exit(0 if not fail else 1)
