@@ -39,12 +39,13 @@ KNOWN_MODELS: List[str] = [
     "bria-rmbg",
 ]
 
+# Default model (can be overridden with env var)
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "birefnet-general-lite")
 
 # How many model sessions to keep in memory at once (LRU cache)
 MAX_SESSIONS = int(os.getenv("MAX_SESSIONS", "1"))
 
-# Preload toggle: if "1", we will download all models at startup
+# If "1", preload all models on startup (download weights once)
 PRELOAD_MODELS = os.getenv("PRELOAD_MODELS", "1")
 
 # simple LRU cache of rembg model sessions
@@ -54,7 +55,7 @@ _session_cache: "OrderedDict[str, object]" = OrderedDict()
 def get_session(model: str):
     """
     Return a cached rembg session for the given model,
-    creating and caching it if needed.
+    creating and caching it if needed. Prefer CUDA, fall back to CPU.
     """
     if model not in KNOWN_MODELS:
         raise HTTPException(
@@ -67,13 +68,37 @@ def get_session(model: str):
         return _session_cache[model]
 
     logger.info(f"Creating new session for model: {model}")
-    sess = new_session(model_name=model)
+
+    try:
+        # Prefer CUDA, with CPU fallback as secondary provider
+        sess = new_session(
+            model_name=model,
+            providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+        )
+        logger.info(
+            "Session for model %s initialized with CUDAExecutionProvider.",
+            model,
+        )
+    except Exception as e:
+        logger.warning(
+            "Failed to initialize CUDAExecutionProvider for model %s: %s. "
+            "Falling back to CPUExecutionProvider.",
+            model,
+            e,
+        )
+        # Pure CPU fallback
+        sess = new_session(
+            model_name=model,
+            providers=["CPUExecutionProvider"],
+        )
+        logger.info("Session for model %s initialized with CPUExecutionProvider.", model)
+
     _session_cache[model] = sess
     _session_cache.move_to_end(model)
 
     while len(_session_cache) > MAX_SESSIONS:
         evicted, _ = _session_cache.popitem(last=False)
-        logger.info(f"Evicted model session from cache: {evicted}")
+        logger.info("Evicted model session from cache: %s", evicted)
 
     return sess
 
@@ -108,7 +133,11 @@ def upscale_image(img: Image.Image, scale: int) -> Image.Image:
 # FastAPI app
 # ----------------------
 
-app = FastAPI(title="rembg-gpu-api", version="1.0.0")
+app = FastAPI(
+    title="rembg-gpu-api",
+    version="1.0.0",
+    description="Simple API to remove background and upscale images using rembg.",
+)
 
 
 @app.on_event("startup")
@@ -129,17 +158,17 @@ async def preload_all_models():
     logger.info("Preloading all rembg models (this may take a while on first run)...")
     for model in KNOWN_MODELS:
         try:
-            logger.info(f"Preloading model: {model}")
+            logger.info("Preloading model: %s", model)
             _ = get_session(model)
         except Exception as e:
-            logger.error(f"Failed to preload model {model}: {e}")
+            logger.error("Failed to preload model %s: %s", model, e)
 
     # Ensure the DEFAULT_MODEL is the most recent in the cache
     try:
         _ = get_session(DEFAULT_MODEL)
-        logger.info(f"Default model ready in cache: {DEFAULT_MODEL}")
+        logger.info("Default model ready in cache: %s", DEFAULT_MODEL)
     except Exception as e:
-        logger.error(f"Failed to ensure default model in cache: {e}")
+        logger.error("Failed to ensure default model in cache: %s", e)
 
     logger.info("Model preload step finished.")
 
@@ -203,5 +232,7 @@ async def remove_background(
     return Response(
         content=out_png,
         media_type="image/png",
-        headers={"Content-Disposition": f'inline; filename="{image.filename or "output"}.png"'},
+        headers={
+            "Content-Disposition": f'inline; filename="{image.filename or "output"}.png"'
+        },
     )
